@@ -92,7 +92,7 @@ def download_track(connection, destination_file: str):
 
 def purge(connection):
     with _init_device(connection) as dev:
-        dev.purge_all_gt900()
+        dev.purge_all_120()
 
 
 def main():

@@ -65,7 +65,7 @@ class GT200Dev:
         log.debug("Send1&2: %s", hexdumps(cmd1 + cmd2))
         self.dev.write(cmd1 + cmd2)
 
-    def read(self, sz):
+    def read(self, sz) -> bytes:
         result = self.dev.read(sz)
         log.debug("Read: %s", hexdumps(result))
         return result
@@ -133,7 +133,8 @@ class GT200Dev:
         for i in range(n_blocks, 0, -1):
             log.debug("I=%s", i)
             if purge_flag:
-                while self.unk_write2(0x01) != chr(0x00):
+                while self.unk_write2(0x01) != b"\x00":
+                    log.debug("Waiting...")
                     pass
             else:
                 if self.flash_read(pos = (i * 0x1000), size = 0x10) != (b"\xff" * 0x10):
@@ -145,8 +146,8 @@ class GT200Dev:
         if purge_flag:
             self.unk_purge1(0x1e)
             self.unk_purge1(0x1f)
-            while self.unk_write2(0x01) != chr(0x00):
-                pass
+            while self.unk_write2(0x01) != b"\x00":
+                log.debug("Waiting...")
         self.unk_purge1(0x1e)
         self.unk_purge1(0x1f)
 
@@ -169,30 +170,30 @@ class GT200Dev:
             self.unk_write1(0x00)
             self.flash_write_purge(i * 0x1000)
             log.debug("UNKW2")
-            while self.unk_write2(0x01) != chr(0x00):
+            while self.unk_write2(0x01) != b"\x00":
                 log.debug("Waiting...")
             log.info("Purged.")
 
 
-    def flash_write_purge(self, pos):
+    def flash_write_purge(self, pos) -> bytes:
         chpos = pack(">I", pos)
         w = 0x20
         self.write_cmd(
-            b"\x93\x06\x07\x00\x00\x04" + chr(w) + chpos[1],
-            chpos[2] + chpos[3] + b"\x00\x00\x00\x00\x00\x00"
+            b"\x93\x06\x07\x00\x00\x04" + bytes([w, chpos[1]]),
+            chpos[2:4] + b"\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
     
-    def unk_write1(self, p1):
+    def unk_write1(self, p1: int) -> bytes:
         self.write_cmd(
-            b"\x93\x06\x04\x00" + chr(p1) + b"\x01\x06\x00",
+            b"\x93\x06\x04\x00" + bytes([p1]) + b"\x01\x06\x00",
             b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
 
-    def unk_write2(self, p1):
+    def unk_write2(self, p1: int) -> bytes:
         p1ch = pack('>H', p1)
         self.write_cmd(
             b"\x93\x05\x04" + p1ch + b"\x01\x05\x00",
@@ -201,17 +202,17 @@ class GT200Dev:
         buf = self.read_resp()
         return buf
 
-    def unk_purge1(self, p1):
+    def unk_purge1(self, p1: int) -> bytes:
         self.write_cmd(
-            b"\x93\x0C\x00" + chr(p1) + b"\x00\x00\x00\x00",
+            b"\x93\x0C\x00" + bytes([p1]) + b"\x00\x00\x00\x00",
             b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
 
-    def unk_purge2(self, p1):
+    def unk_purge2(self, p1: int) -> bytes:
         self.write_cmd(
-            "\x93\x08\x02" + chr(p1) + "\x00\x00\x00\x00",
+            "\x93\x08\x02" + bytes([p1]) + "\x00\x00\x00\x00",
             "\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
