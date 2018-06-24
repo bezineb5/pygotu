@@ -10,8 +10,6 @@ CONNECTION_TYPE_SERIAL = "SERIAL"
 
 VENDOR_ID = 0x0df7
 PRODUCT_ID = 0x0900
-INTERFACE = 0
-ENDPOINT = 0x81
 
 SLOW_TIMEOUT = 2000
 FAST_TIMEOUT = 20
@@ -23,8 +21,11 @@ class USBSerial(object):
 
     def __init__(self):
         self.receive_buffer = bytearray()
+        self.number_of_requests = 0
 
         dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+        if not dev:
+            raise Exception("No matching device found")
         dev.set_configuration()
         # get an endpoint instance
         cfg = dev.get_active_configuration()
@@ -38,11 +39,11 @@ class USBSerial(object):
                 usb.util.endpoint_direction(e.bEndpointAddress) == \
                 usb.util.ENDPOINT_IN)
 
-        assert ep is not None
+        if not ep:
+            raise Exception("No matching endpoint found")
 
         self.dev = dev
         self.endpoint = ep
-        self.number_of_requests = 0
 
     @property
     def timeout(self):

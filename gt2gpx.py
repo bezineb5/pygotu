@@ -23,7 +23,7 @@ GPXDATA_TRACK = """  <trk>
 """
 
 GPXDATA_RECORD = """      <trkpt lat="{0.lat}" lon="{0.lon}">
-        <ele>{0.ele_gps}</ele>
+        <ele>{0.elevation}</ele>
         <time>{0.datetime:%Y-%m-%dT%H:%M:%S.%fZ}</time>
         <sat>{0.sat}</sat>
         <extensions>
@@ -65,6 +65,7 @@ def _init_device(connection) -> pygotu.GT200Dev:
     dev = pygotu.GT200Dev(connection)
     dev.nmea_switch(pygotu.MODE_CONFIGURE)
     dev.identify()
+    dev.model()
     return dev
 
 
