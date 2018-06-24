@@ -5,6 +5,7 @@ import os.path
 import sys
 
 import pygotu
+import connections
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,15 @@ def _parse_arguments():
     parser = argparse.ArgumentParser(description='iGotU GPS manipulation tool')
     parser.add_argument("--verbose", "-v", action='store_const', const=logging.DEBUG,
                         default=logging.INFO, help="Display debugging information in the output")
+
+    # Connection type
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--usb', action='store_true',
+                       help="Connect to the device using USB")
+    group.add_argument('--serial',
+                       help="Connect to the device using the specified serial port")
+
+    # Actions
     subparsers = parser.add_subparsers(dest="action", help='sub-command help')
 
     parser_get = subparsers.add_parser(ACTION_GET, help='Download track from GPS logger')
@@ -51,15 +61,15 @@ def _parse_arguments():
     return parser.parse_args()
 
 
-def _init_device() -> pygotu.GT200Dev:
-    dev = pygotu.GT200Dev()
+def _init_device(connection) -> pygotu.GT200Dev:
+    dev = pygotu.GT200Dev(connection)
     dev.nmea_switch(pygotu.MODE_CONFIGURE)
     dev.identify()
     return dev
 
 
-def download_track(destination_file: str):
-    with _init_device() as dev:
+def download_track(connection, destination_file: str):
+    with _init_device(connection) as dev:
         #log.debug("numData: %s", dev.count())
 
         with open(destination_file, "w") as f:
@@ -80,8 +90,8 @@ def download_track(destination_file: str):
             f.write(GPXDATA_END)
 
 
-def purge():
-    with _init_device() as dev:
+def purge(connection):
+    with _init_device(connection) as dev:
         dev.purge_all_gt900()
 
 
@@ -89,12 +99,19 @@ def main():
     arguments = _parse_arguments()
     
     logging.basicConfig(level=arguments.verbose)
-    action = arguments.action
 
+    # Connection
+    if arguments.serial:
+        connection = connections.get_connection(connections.CONNECTION_TYPE_SERIAL, arguments.serial)
+    else:
+        connection = connections.get_connection(connections.CONNECTION_TYPE_USB)
+
+    # Performing the requested action
+    action = arguments.action
     if action == ACTION_GET:        
-        download_track(arguments.dest)
+        download_track(connection, arguments.dest)
     elif action == ACTION_PURGE:
-        purge()
+        purge(connection)
 
 
 if __name__ == '__main__':
