@@ -18,7 +18,7 @@ MODELS = {
     0x13: ("GT-100", 0x080, False),
     0x14: ("GT-200", 0x200, False),
     0x15: ("GT-120", 0x100, False),
-    0x17: ("GT-200e/GT-600", 0x800, True),
+    0x17: ("GT-200e/GT-600", 0x700, True),
 }
 
 def hexdumps(s: bytes) -> None:
