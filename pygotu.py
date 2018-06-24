@@ -1,57 +1,158 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import sys, os, time
-import serial
-import datetime, time
+import datetime
+import logging
+import os
+import sys
+import time
+from functools import lru_cache
 from struct import pack, unpack
 
+import serial
+import usb.core
+import usb.util
 
-devname = '/dev/ttyACM0'
+log = logging.getLogger(__name__)
+
+VENDOR_ID = 0x0df7
+PRODUCT_ID = 0x0900
+INTERFACE = 0
+ENDPOINT = 0x81
+TIMEOUT = 20
+
+MODE_GPS_DONGLE = 0
+MODE_GPS_TRACKER = 1
+MODE_CONFIGURE = 3
+
 
 def hexdumps(s):
-    return " ".join("{:02X}".format(ord(ch)) for ch in s)
+    return s.hex()
+
+
+def bitcount(n):
+    count = 0
+    while n > 0:
+        if (n & 1 == 1):
+            count += 1
+        n >>= 1
+
+    return count
+
+
+lru_cache(maxsize=4)
+def get_year(year_offset: int) -> int:
+    current_year = datetime.date.today().year
+    quotient = (current_year - 2000) // 16
+    year = 2000 + 16 * quotient + year_offset
+
+    if year > current_year:
+        year -= 16
+
+    return year
 
 
 
-class GTDev:
-    def __init__(self, devname, debug = False):
-        self.devname = devname
-        self.dev = serial.Serial(devname, 9600)
+class USBSerial(object):
+    __slots__ = ['receive_buffer', 'dev', 'endpoint']
+
+    def __init__(self):
+        self.receive_buffer = bytearray()
+
+        dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+        dev.default_timeout = TIMEOUT
+        dev.set_configuration()
+        # get an endpoint instance
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0,0)]
+
+        ep = usb.util.find_descriptor(
+            intf,
+            # match the first IN endpoint
+            custom_match = \
+            lambda e: \
+                usb.util.endpoint_direction(e.bEndpointAddress) == \
+                usb.util.ENDPOINT_IN)
+
+        assert ep is not None
+
+
+        self.dev = dev
+        self.endpoint = ep
+
+    def write(self, data):
+        # Using control write, 8 bytes per transfer
+        result = self.dev.ctrl_transfer(0x21, 0x09, 0x0200, 0x0000, data[:8])
+        assert result == 8
+        self.read(3)
+        result = self.dev.ctrl_transfer(0x21, 0x09, 0x0200, 0x0000, data[8:])
+        assert result == 8
+        
+    
+    def read(self, size=1):
+        self._fill_receive_buffer(size)
+        data = self.receive_buffer[:size]
+        self.receive_buffer = self.receive_buffer[size:]
+
+        return data
+
+    def _fill_receive_buffer(self, size):
+        while(len(self.receive_buffer) < size):
+            raw_data = self.endpoint.read(0x10)
+            data = raw_data.tobytes()
+            self.receive_buffer.extend(data)
+
+
+    def flush(self):
+        self.receive_buffer.clear()
+        try:
+            self.endpoint.read(0x10)
+        except:
+            pass
+    
+    def close(self):
+        pass
+
+
+class GT200Dev:
+    __slots__ = ['dev']
+
+    def __init__(self):
+        self.dev = USBSerial() #serial.Serial(devname, 9600)
         self.dev.flush()
-        self.debug = debug
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+    
+    def close(self):
+        self.dev.close()        
 
     def write_cmd(self, cmd1, cmd2):
+        self.dev.flush()
         assert len(cmd1) == 8
         assert len(cmd2) == 8
         cs = 0
         for ch in cmd1 + cmd2[:7]:
-            cs += ord(ch)
-        cs = cs & 0xff
+            cs += ch
         cs = ((cs^0xff) + 0x01) & 0xff
-        cmd2 = cmd2[:7] + chr(cs)
-        if self.debug:
-            print "Send1&2: ", hexdumps(cmd1 + cmd2)
+        cmd2 = cmd2[:7] + bytes([cs])
+        log.debug("Send1&2: %s", hexdumps(cmd1 + cmd2))
         self.dev.write(cmd1 + cmd2)
-        #print "Send2: ", hexdumps(cmd2)
-        #self.dev.write(cmd2)
 
     def read(self, sz):
         result = self.dev.read(sz)
-        if self.debug:
-            print "Read: ", hexdumps(result)
+        log.debug("Read: %s", hexdumps(result))
         return result
 
     def read_resp(self, fmt = None):
         recv = self.read(3)
-        if recv[0] != "\x93":
-            raise Exception()
-        m, sz = unpack(">ch", recv)
+        if recv[0] != 0x93:
+            raise Exception("Unable to identify device")
+        _, sz = unpack(">ch", recv)
         if sz < 0:
-            if self.debug:
-                print "Read Error:", sz
-                return None
-        if self.debug:
-            print "Reading", sz, "bytes..."
+            log.debug("Read Error: %s", sz)
+            return None
+        log.debug("Reading %s bytes...", sz)
 
         resp = self.read(sz)
         if fmt:
@@ -61,42 +162,40 @@ class GTDev:
 
 
     def nmea_switch(self, mode):
-        mch = ["\x00", "\x01", "\x02", "\x03"][mode]
+        mch = [b"\x00", b"\x01", b"\x02", b"\x03"][mode]
         self.write_cmd(
-            "\x93\x01\x01" + mch + "\x00\x00\x00\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x01\x01" + mch + b"\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         self.read(1)
 
     def identify(self):
         self.write_cmd(
-            "\x93\x0a\x00\x00\x00\x00\x00\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x0a\x00\x00\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         serial, v_maj, v_min, model, v_lib = self.read_resp(fmt = "IbbHH")
-        if self.debug:
-            print "Serial:", serial
-            print "Ver:", v_maj, v_min
-            print "Model:", model
-            print "USBlib:", v_lib
+        log.debug("Serial: %s", serial)
+        log.debug("Ver: %s.%s", v_maj, v_min)
+        log.debug("Model %s:", model)
+        log.debug("USBlib: %s", v_lib)
 
     def count(self):
         self.write_cmd(
-            "\x93\x0b\x03\x00\x1d\x00\x00\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x0b\x03\x00\x1d\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         n1, n2 = self.read_resp(fmt = "Hb")
         num = n1*256 + n2
-        if self.debug:
-            print "Num DP:", num, "(", n1, n2, ")"
+        log.debug("Num DP: %s (%s %s)", num, n1, n2)
         return num
 
     def flash_read(self, pos = 0, size = 0x1000):
         chpos = pack(">I", pos)     
         chsz = pack(">H", size)   
         self.write_cmd(
-            "\x93\x05\x07" + chsz + "\x04\x03" + chpos[1],
-            chpos[2] + chpos[3] + "\x00\x00\x00\x00\x00\x00"
+            b"\x93\x05\x07" + chsz + b"\x04\x03" + chpos[1:2],
+            chpos[2:4] + b"\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
@@ -106,12 +205,12 @@ class GTDev:
         n_blocks = 0x700
         
         for i in range(n_blocks, 0, -1):
-            print "I=", i
+            log.debug("I=%s", i)
             if purge_flag:
                 while self.unk_write2(0x01) != chr(0x00):
                     pass
             else:
-                if self.flash_read(pos = (i * 0x1000), size = 0x10) != ("\xff" * 0x10):
+                if self.flash_read(pos = (i * 0x1000), size = 0x10) != (b"\xff" * 0x10):
                     purge_flag = True
                 else:
                     continue
@@ -131,38 +230,38 @@ class GTDev:
         n_blocks = 0x700
         
         for i in range(n_blocks-1, 0, -1):
-            print "I=", i
+            log.debug("I=%s", i)
             if not purge_flag:
-                print "NP"
-                if self.flash_read(pos = (i * 0x1000), size = 0x10) != ("\xff" * 0x10):
-                    print "pf = true"
+                log.debug("NP")
+                if self.flash_read(pos = (i * 0x1000), size = 0x10) != (b"\xff" * 0x10):
+                    log.debug("pf = true")
                     purge_flag = True
                 else:
-                    print "cont."
+                    log.debug("cont.")
                     continue
-            print "Writing"
+            log.debug("Writing")
             self.unk_write1(0x00)
             self.flash_write_purge(i * 0x1000)
-            print "UNKW2"
+            log.debug("UNKW2")
             while self.unk_write2(0x01) != chr(0x00):
-                print "Waiting..."
-            print "Purged."
+                log.debug("Waiting...")
+            log.info("Purged.")
 
 
     def flash_write_purge(self, pos):
         chpos = pack(">I", pos)
         w = 0x20
         self.write_cmd(
-            "\x93\x06\x07\x00\x00\x04" + chr(w) + chpos[1],
-            chpos[2] + chpos[3] + "\x00\x00\x00\x00\x00\x00"
+            b"\x93\x06\x07\x00\x00\x04" + chr(w) + chpos[1],
+            chpos[2] + chpos[3] + b"\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
     
     def unk_write1(self, p1):
         self.write_cmd(
-            "\x93\x06\x04\x00" + chr(p1) + "\x01\x06\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x06\x04\x00" + chr(p1) + b"\x01\x06\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
@@ -170,16 +269,16 @@ class GTDev:
     def unk_write2(self, p1):
         p1ch = pack('>H', p1)
         self.write_cmd(
-            "\x93\x05\x04" + p1ch + "\x01\x05\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x05\x04" + p1ch + b"\x01\x05\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
 
     def unk_purge1(self, p1):
         self.write_cmd(
-            "\x93\x0C\x00" + chr(p1) + "\x00\x00\x00\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x0C\x00" + chr(p1) + b"\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
@@ -202,13 +301,15 @@ class GTDev:
         while True:
             rpos += 1
             buf = self.flash_read(rpos * 0x1000)
-            for i in range(len(buf) / RECSIZE):
-                yield GTRecord(num_rec_read, buf[i*RECSIZE:(i+1)*RECSIZE])
+            for i in range(len(buf) // RECSIZE):
+                record = GTRecord(num_rec_read, buf[i*RECSIZE:(i+1)*RECSIZE])
+                if record.valid:
+                    yield record
                 num_rec_read += 1
                 if num_rec_read >= num_rec_all:
-                    if self.debug: print "End by count:", num_rec_all
+                    log.debug("End by count: %s", num_rec_all)
                     return
-            if self.debug: print "End RECLOOP"
+            log.debug("End RECLOOP")
 
     def all_tracks(self):
         idx = 0
@@ -226,6 +327,8 @@ class GTDev:
 
 
 class GTTrack:
+    __slots__ = ['idx', 'records']
+
     def __init__(self, idx, reclist):
         self.idx = idx
         self.records = list(reclist)
@@ -254,6 +357,9 @@ class GTTrack:
         return "{0.idx}: {0.first_time:%Y/%m/%d %H:%M:%S} - {0.last_time:%Y/%m/%d %H:%M:%S} points:[{0.num_points}]".format(self)
 
 class GTRecord:
+    __slots__ = ['valid', 'idx', 's', 'plr', 'flag', 'datetime', 'msg', 'kind', 'lat', 'lon',
+                 'ele_gps', 'speed', 'course', 'sat', 'desc', 'ehpe', 'unk1', 'flagopts']
+
     def __init__(self, idx, s):
         self.valid = True
         self.idx = idx
@@ -261,24 +367,30 @@ class GTRecord:
         flag, ym, dhm, ms = unpack(">BBHH", self.s[0x00:0x06])
         self.plr = unpack(">H", self.s[0x1e:0x20])
         self.flag = flag
-        self.year = (ym >> 4) + 2000
-        self.month = (ym & 0x0F) % 13
-        self.day = dhm >> 11
-        if self.day <= 0:
-            self.day = 1
-        self.hour = ((dhm >> 6) & 0b00011111) %24
-        self.minutes = (dhm & 0b00111111) % 60
-        self.sec = int(ms / 1000) % 60
-        self.ms = ms % 1000
+        
+        year = get_year(ym >> 4)
+        month = (ym & 0x0F) % 13
+        day = dhm >> 11
+        if day <= 0:
+            day = 1
+        hour = ((dhm >> 6) & 0b00011111) %24
+        minutes = (dhm & 0b00111111) % 60
+        sec = int(ms / 1000) % 60
+        ms = ms % 1000
 
         try:
-            self.datetime = datetime.datetime(self.year, self.month, self.day, self.hour, self.minutes, self.sec, self.ms)
+            self.datetime = datetime.datetime(year, month, day, hour, minutes, sec, ms)
         except ValueError:
             self.datetime = None
             self.valid = False
-            print "InvalidDate:", (self.year, self.month, self.day, self.hour, self.minutes, self.sec, self.ms)
+            log.warning("InvalidDate: %s", (year, month, day, hour, minutes, sec, ms))
             
-        self.msg = ""
+        self.msg = None
+
+        if flag & 0x20 != 0:
+            # Invalid point
+            self.valid = False
+            log.warning("Invalid flag found, %s", flag)
 
         if flag == 0xF1:
             self.parse_device_log()
@@ -288,24 +400,26 @@ class GTRecord:
             self.parse_waypoint()
 
     @property
+    def is_waypoint(self):
+        return self.kind == "WP"
+
+    @property
     def localtime(self):
         return self.datetime - datetime.timedelta(seconds = time.timezone)
     
     def parse_waypoint(self):
         self.kind = "WP"
-        (ae, self.r_ele_p, self.r_lat, self.r_lon, self.r_ele_gps, self.r_speed, self.r_course, self.f2) = unpack(">HiIIiHHH", self.s[0x06:0x1e])
+        (ae, r_sat_map, r_lat, r_lon, r_ele_gps, r_speed, r_course, f2) = unpack(">HiiiiHHH", self.s[0x06:0x1e])
         
         self.unk1 = (ae >> 12)
-        self.ehpe = (ae & 0b0000111111111111) / 10.0 # in m
+        self.ehpe = (ae & 0b0000111111111111) * 1e-2 * 0x10 # in m
 
-        self.lon = self.r_lon / 10000000.0 # 
-        self.lat = self.r_lat / 10000000.0 #
-        self.ele = self.r_ele_p / 100.0 # in m
-        self.ele_gps = self.r_ele_gps / 100.0 # in m
-        self.speed = (self.r_speed / 100.0) / 1000.0 * 3600.0 # km/h
-        self.course = self.r_course / 100.0 # degree
-        self.sat = self.f2 & 0b00001111 # num of sat
-        
+        self.lon = r_lon / 10000000.0 # 
+        self.lat = r_lat / 10000000.0 #
+        self.ele_gps = r_ele_gps / 100.0 # in m
+        self.speed = (r_speed / 100.0) / 1000.0 * 3600.0 # km/h
+        self.course = r_course / 100.0 # degree
+        self.sat = bitcount(r_sat_map) # f2 & 0b00001111 # num of sat
         
         self.flagopts = set()
         
@@ -314,10 +428,15 @@ class GTRecord:
             if self.flag & (1 << bit):
                 self.flagopts.add(FLAGNAMES[bit])
         
-        self.fopts = ",".join(self.flagopts)
+        #self.fopts = ",".join(self.flagopts)
         
-        self.desc = "WP LATLON:({0.lat}, {0.lon}) ele:{0.ele} speed:{0.speed} uf={0.unk1:b},{0.f2:b} ehpe={0.ehpe} {0.fopts}".format(self)
+        if self.lat == 0 and self.lon == 0:
+            self.valid = False
 
+        self.desc = "WP LATLON:({0.lat}, {0.lon}) ele:{0.ele_gps} speed:{0.speed} uf={0.unk1:b} ehpe={0.ehpe} {0.flagopts}".format(self)
+
+    def parse_heartbeat(self):
+        raise NotImplementedError()
 
     def parse_device_log(self):
         self.kind = "LOG"
@@ -332,7 +451,7 @@ class GTRecord:
         return "{0.datetime:%Y/%m/%d %H:%M:%S} {0.desc}".format(self)
 
 def test():
-    dev = GTDev(devname, debug = False)
+    dev = GT200Dev()
 
     dev.identify()
     n = dev.count()
@@ -341,11 +460,13 @@ def test():
     #    print track
 
     for rec in dev.all_records():
-        print "- ", rec.idx, "/", n, ":", rec
+        print("- ", rec.idx, "/", n, ":", rec)
+    
+    dev.close()
+
 
 def main():
     test()
 
 if __name__ == '__main__':
     main()
-
