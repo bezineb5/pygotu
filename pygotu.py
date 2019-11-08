@@ -21,7 +21,7 @@ MODELS = {
     0x17: ("GT-200e/GT-600", 0x700, True),
 }
 
-def hexdumps(s: bytes) -> None:
+def hexdumps(s: bytes) -> str:
     return s.hex()
 
 
@@ -242,8 +242,8 @@ class GT200Dev:
 
     def unk_purge2(self, p1: int) -> bytes:
         self.write_cmd(
-            "\x93\x08\x02" + bytes([p1]) + "\x00\x00\x00\x00",
-            "\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\x93\x08\x02" + bytes([p1]) + b"\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00"
         )
         buf = self.read_resp()
         return buf
